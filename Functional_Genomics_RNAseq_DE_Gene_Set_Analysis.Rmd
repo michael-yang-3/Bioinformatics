@@ -1,0 +1,323 @@
+---
+title: "BMENE4000 Asignment 2"
+author: "Michael Yang"
+date: "10/27/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+## Installation
+```{r}
+if(!requireNamespace("BiocManager",quietly=TRUE))
+  install.packages("BiocManager")
+BiocManager::install(version="3.13")
+```
+
+
+```{r}
+BiocManager::install(c('BiocGenerics','DelayedArray','DelayedMatrixStats','limma','S4Vectors','SingleCellExperiment','SummarizedExperiment','batchelor','Matrix.utils'))
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(monocle3)
+```
+
+```{r}
+cds <- readRDS("dataset2.rds")
+```
+
+View containers in the cell_data_set object:
+
+Using pipes:
+```{r}
+cds %>% exprs() %>% head()
+```
+
+
+Dataframes:
+```{r}
+cds %>% colData() %>% head()
+```
+Columns:
+sample, cell, total_umis, size_factor, gene, sgRNA, sgRNA_umi_count, proportion, condition, treatment, position 
+
+
+```{r}
+cds %>% rowData() %>% head()
+```
+Columns: ID, gene_short_name
+
+
+Analyze the types of data:
+```{r}
+cds %>% exprs() %>% class()
+cds %>% colData() %>% class()
+cds %>% rowData() %>% class()
+```
+
+
+```{r}
+cds %>% head()
+```
+
+
+
+Summarize using dplyr
+```{r}
+cds %>%
+  colData() %>%
+  as.data.frame() %>%
+  group_by(sample) %>%
+  summarise(total_cells = n())
+```
+
+```{r}
+rows <- cds %>%
+  rowData() %>%
+  as.data.frame() %>%
+  group_by(gene_short_name) %>%
+  summarise(total_genes = n())
+rows
+```
+
+```{r}
+dg <- detect_genes(cds)
+dg %>% colData() %>% head()
+```
+
+```{r}
+dg %>% rowData() %>% head()
+```
+
+
+## Q1-1: Genes Expressed in 5%+ cells in Dataset
+
+I calculated the total number of cells as 6562 by using the cds column data to find total cells in each sample (group_by), then multiplied that by 0.05 and used that value as the threshold in a filter function prior to summarising the data. The amount of rows after grouping by gene_short_name was what I decided to be the total number of genes that are within the dataset that have passed the initial filtering and thus are expressed in 5% or more of cells in our dataset. 
+
+```{r}
+dg %>% 
+  rowData() %>%
+  as.data.frame() %>%
+  filter(num_cells_expressed >= (0.05 * 6562))
+```
+
+I used the num_cells_expressed column to filter out the detect_genes passed dataframe to find the genes that were expressed in over (0.05 * 6562), which should be representative of the 5% or more of the cells in the datasets. Therefore, from the table above I can say that the number of genes expressed in 5% or more of the cells in the dataset is 9,180. 
+
+
+
+
+## Q1-2: Coefficient Table from Fitted Model of Treatments
+
+Create subset to use with fit_model
+```{r}
+subset <- dg %>% 
+  rowData() %>%
+  as.data.frame() %>%
+  dplyr::filter(num_cells_expressed >= (0.05 * 6562))
+```
+
+```{r}
+subset %>% head()
+```
+
+
+Fit_models using the list of genes from Q1-1:
+```{r}
+cds_subset <- cds[match(subset$gene_short_name, rowData(cds)$gene_short_name),]
+```
+
+```{r}
+cds_subset %>% rowData()
+```
+Why is the num_cells_expressed column deleted? Assuming it is because num_cells_expressed was only a column available on detect_genes output only
+
+The number of rows matches the subset (9180)
+
+```{r}
+cds_subset %>% colData() %>% as.data.frame()
+unique(cds_subset$treatment)
+```
+
+```{r}
+gene_fits <- fit_models(cds_subset, model_formula_str = "~treatment")
+```
+
+```{r}
+fit_coefs <- coefficient_table(gene_fits)
+```
+
+```{r}
+fit_coefs %>% head()
+```
+```{r}
+test_fits <- coefficient_table(gene_fits) %>% dplyr::select(-model,-model_summary)
+```
+
+## Write as separate tab-delimited text file:
+```{r}
+data_fits <- as.data.frame(test_fits)
+write.table(data_fits, "Coeff_Table_Fits.txt", sep="\t")
+```
+
+
+```{r}
+unique(test_fits$term)
+```
+The dimensions of our coefficient table are 18,360 rows by 13 columns as shown above, and this table of coefficients does indeed contain the key columns similar to that of the table in the Cole Trapnell Lab webpage, including "term" which is in terms of treatment as expected, as well as the normalized effect sizes and p, q values.
+
+
+## Q1-3: Plotting Volcano Plot
+
+First extracting intercept terms to get the treatment ones:
+```{r}
+treat_terms <- test_fits %>% filter(term != "(Intercept)")
+```
+
+```{r}
+treat_terms %>% head()
+```
+
+```{r}
+vol_plot <- treat_terms %>%
+  ggplot(aes(x = normalized_effect,
+             y = -log10(q_value))) + 
+  geom_point() + ggtitle("Relation Between Statistical Significance and Effect Size")
+
+vol_plot
+```
+From the volcano plot, we can see that postivie normalized effect sizes are more correlated consistently with larger statistical significance. 
+
+
+## Question 2-1:
+
+```{r}
+top_genes <- treat_terms %>% filter (q_value < 0.01) %>% select(gene_short_name, term, normalized_effect, q_value, estimate)
+
+top_genes
+```
+By filtering the coefficient table by the adjusted p-value cutoff of 0.01 (q_value < 0.01), we can see that the total number of rows (indicating unique gene_short_names) is 3,286, which here is the total number of genes differentially regulated by treatment at q_value cutoff of 0.01. 
+
+
+## Q2-2: Top Unregulated Gene As Function of Treatment
+
+As stated in Piazza, the "top upregulated gene" here represents the gene with the highest normalized effect following our analysis of performing q_value cutoff.
+```{r}
+top_treat <- top_genes[order(-top_genes$normalized_effect),]
+
+top_treat
+```
+As we can see here, the top upregulated gene is TGM2, due to the fact that it has the highest normalized effect size.
+
+```{r}
+cds_sub <- cds_subset[rowData(cds_subset)$gene_short_name == 'TGM2',]
+
+plot_genes_violin(cds_sub, group_cells_by='treatment') +
+      theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+Coincidentally, this was the same gene that I had used to analyze the bonus question in Assignment 1. Transglutaminase 2 is a protein coding gene that primarily mediates post-translational modifications of proteins into protein-bound glutamine residues. It also been observed to increase in expression in several types of cancers, especially so in cancer-associated stress conditions (Cho et al., 2020). In a study analyzing the expression profiling of genes regulated by TGF-beta in cancer cells, TGM2 was notably increased in expression for a long period of time following TGFB treatment, even compared to expression of other genes such as MMP2 or IGFBP7 (Ranganathan et al., 2007). 
+
+Upregulation of TGM2 seems to lead to greater changes in ECM protein cross-linking, making ECM proteins resistant to enzymatic degradation and physical breakdown. Meanwhile, TGFB-2 is known to be elevated in patients with glaucoma, and that leads to increase of ECM deposition in the trabecular meshwork as well as an increase in intraocular pressure. Historically, it has been reported that TGFB-2 induces TGM2 expression and thus protein levels (Vidales et al., 2011). Therefore, it is consistent that TGM2 expression increases with TGFB-2 treatment. 
+
+
+## Q2-3: Top 100 Upregulated, Top 100 Downregulated
+Finding top 100 upregulated
+```{r}
+top_100 <- top_genes[order(-top_genes$normalized_effect),]
+
+top100 <- as.data.frame(top_100)
+
+upreg <- top_n(top100, 100)
+
+upreg
+```
+```{r}
+up100 <- list(upreg$gene_short_name)
+
+up100
+```
+
+```{r}
+lapply(up100, write, "Upregulated100.txt", append=TRUE, ncolumns=1000, sep=",")
+```
+
+From Reactome, the top 5 - 10 gene sets determined by normalized effect size are (sorted by "entities found":
+
+Interleukin-10 Signaling
+ECM organization
+Non-integrtin membrane-ECM interactions
+Anchoring Fibril formation
+Laminin interactions
+ECM proteoglycans
+Integrin cell surface interactions
+Molecules associated with elastic fibres
+Assembly of collagen fibrils and other multimetric structures
+Elastic fibre formation
+
+It seems that TGFB-2 treatment has an effect on cells by increasing the strength of ECM organization and connection (hence the effect on anchoring fibril formation, laminin interactions, and integrin cell surface interactions, as well as association with other fibrils and connective fibers), and most importantly the top gene set here is the effect on interleukin-10 signaling; interleukin-10 is a cytokine that boasts anti-inflammatory properties and plays a central role in limiting host immune responses to pathogens. Additionally, it can also regulate ECM production as reported by Hodges et al., 2017. Overall, it appears to have an effect on cellular proliferation as it can modify the properties of ECM as well as cellular interactions with ECM and other surfaces on which they would grow; these gene sets are supported by literature which also note the effect of TGFB on cellular proliferation, ECM manipulation, and prevention of ECM breakdown by enzymatic means (Verrecchia and Mauviel, 2002). 
+
+Finding top 100 downregulated
+```{r}
+bot_100 <- top_genes[order(top_genes$normalized_effect),]
+
+bot100 <- as.data.frame(bot_100)
+
+downreg <- top_n(bot100, -100)
+
+downreg
+```
+
+```{r}
+down100 <- list(downreg$gene_short_name)
+
+down100
+```
+
+```{r}
+lapply(down100, write, "Downregulated100.txt", append=TRUE, ncolumns=1000, sep=",")
+```
+
+From Reactome, the top 5 - 10 gene sets determined by normalized effect size are (sorted by "entities found":
+
+Formation of the cornified envelope
+Keratinization
+Response of EIF2AKI (HRI) to heme deficiency
+Reversible hydration of CO2
+NGF-stimulated transcription
+Metal sequesteration by antimicrobial proteins
+Apoptosis induced DNA fragmentation
+Regulation of gene expression by Hypoxia-inducible factor
+Formation of Senescence-associated heterochromatin foci (SAHF)
+Nuclear events (kinase and transcription factor activation)
+
+Interestingly, while the upregulated genes and the top gene sets from that analysis gave connections to cellular proliferation and strengthening of the ECM, it appears that these top gene sets from the downregulated genes are more in context of cell death. The top gene set here, cornified envelope formation, refers to the endpoint of epidermal differentiation and cell death. This is also true of some other gene sets here, such as apoptosis induced DNA fragmentation, formation of SAHF, and keratinization. The process of keratinization in particular goes hand in hand with formation of the cornified envelope. In fact, it has been reported that TGFB has inhibited growth of keratinocytes and changed cellular functions related to proliferation and cell death (Matsumoto et al., 1990). We can conclude a similar conclusion to the upregulated genes in stating that TGFB prevents cellular death and other similar biological activities relating to stress factors (hypoxia, CO2 regulation, and EIF2AKI).
+
+## Bonus:
+In the case of this dataset, the phenotype induced by TGFB is induction of an EMT, or epithelial to mesenchymal transition (transdifferentiation), where the cells lose epithelial characteristics and acquire migratory behavior, allowing them to move away from their epithelial cell community and integrate into surrounding tissue (Xu et al., 2009). It has been shown that TGFB siganling plays an important role in inducing EMT. 
+Of the top upregulated genes, TGM2 specifically is associated with EMT; increased expression of TGM2 increases EMT, and the reverse is also true and has been reported as silencing of TGM2 reverses EMT (He et al., 2015). This makes sense, as TGM2 directly works with re-working ECM and thus enabling cells to move and stay anchored in a newer location. Inhibition of TAGLN also revealed a similar suppression of EMT (Chen et al., 2019). 
+For downregulated genes, interestingly CA9 expression seems to also promote EMT (Hyuga et al., 2017). For other downregulated genes, such as SPRR3, are markers of inhibition of EMT which makes sense here that they would be downregulated following TGFB treatment. 
+
+
+## Question 3-1: Exome Sequencing
+As discussed in class, in theory, the sequence of the child in the parent-child triad should be similar to the parents, as half comes from the mother and half from the father. Therefore, the potential locus of interest, the causal gene, occurred as a mutation through this passing of DNA from parent to child between triads. In exome sequencing, we can follow steps including hybridization, in which the exon fragments are hibridized to DNA probes and are conjugated to biotin for targeted capture with strepavidin. Those DNA fragments captured are then sequenced, and aligned to a reference genome. 
+In this case, since children in a trio contain sequences from both parents, we can use the parents' sequences as reference sequences to locate the areas of parent DNA sequences that are in the child (from which parent), and use that method to identify the differing genes that are of interest. To identify the exons, we could use the Consensus Coding Sequence database as noted in class to find annotated coding sequences to use as reference, to focus on specific coding sequences of interest instead of broader exon definitions like in the paper discussed, or we could simply use ORFs to filter regions where we know of exon-intron boundaries. To compare differences in coding regions between different triads, we could compare all individuals to a reference genome that could be annotated, to see in a broader sense how each individual (and especially the children, since we assume here in the trio that the child has the mutation and it occurred not in the parents), similar to the technique that was used in Ng et al as discussed in class. 
+In terms of expecting to see the same variant mutation in all affected individuals in our small sample size, we would only expect to see each variant once. As noted in class, for this small population, most of the variants are rare and thus unique to each individual; only as we get to larger populations can we begin to see the same variants in more individuals.
+
+
+## Question 3-2: Identifying non-coding loci
+To identify non-coding loci that specifically interact with the BHMT locus, we could generally use chromatin conformation capture assays, which capture described interaction frequencies between two loci. The non-coding loci can be identified through sequencing analyses, and since we know the location of BHMT, then we can narrow the scope. In particular, we could use 4C, which captures interactions between 1 pre-determined loci (in our case, BHMT), and the genome to find interactions with other loci that we can then determine to be non-coding. This is also the most un-biased compared to other methods, as this involves the interaction of all genomic regions with our BHMT locus specifically, as opposed to something like Hi-C or ChIA-PET, which are whole-genome to genome comparisons. We can use interaction matricies to map interactions and interaction frequency. We could possibly validate the interactions by mediating gene expression to observe the effect of repression of one with interactions by the other locus, such as RNA mediated gene repression or other types of epigenetic control. Or, we can validate by analyzing TAD boundaries, as a form of gene expression regulation and compartmentalize the genome. 
+
