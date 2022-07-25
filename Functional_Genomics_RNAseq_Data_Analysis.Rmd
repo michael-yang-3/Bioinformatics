@@ -1,0 +1,388 @@
+---
+title: "BMENE4000 Asignment 3"
+author: "Michael Yang"
+date: "10/27/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Installation
+```{r}
+if(!requireNamespace("BiocManager",quietly=TRUE))
+  install.packages("BiocManager")
+BiocManager::install(version="3.13")
+```
+
+
+```{r}
+BiocManager::install(c('BiocGenerics','DelayedArray','DelayedMatrixStats','limma','S4Vectors','SingleCellExperiment','SummarizedExperiment','batchelor','Matrix.utils'))
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(monocle3)
+```
+
+```{r}
+cds <- readRDS("dataset2.rds")
+```
+
+View containers in the cell_data_set object:
+
+Using pipes:
+```{r}
+# cds %>% exprs() %>% head()
+```
+
+
+Dataframes:
+```{r}
+cds %>% colData() %>% head()
+```
+Columns:
+sample, cell, total_umis, size_factor, gene, sgRNA, sgRNA_umi_count, proportion, condition, treatment, position 
+
+
+```{r}
+cds %>% rowData() %>% head()
+```
+Columns: ID, gene_short_name
+
+
+Analyze the types of data:
+```{r}
+cds %>% exprs() %>% class()
+cds %>% colData() %>% class()
+cds %>% rowData() %>% class()
+```
+
+
+```{r}
+cds %>% head()
+```
+
+
+
+Summarize using dplyr
+```{r}
+cds %>%
+  colData() %>%
+  as.data.frame() %>%
+  group_by(sample) %>%
+  summarise(total_cells = n()) %>% 
+  head()
+```
+
+```{r}
+rows <- cds %>%
+  rowData() %>%
+  as.data.frame() %>%
+  group_by(gene_short_name) %>%
+  summarise(total_genes = n())
+rows %>% head()
+```
+
+```{r}
+dg <- detect_genes(cds)
+dg %>% colData() %>% head()
+```
+
+```{r}
+dg %>% rowData() %>% head()
+```
+
+
+## Q1-1: PCA For Genes Expressed in 5%+ cells in Dataset
+
+From last assignment: I calculated the total number of cells as 6562 by using the cds column data to find total cells in each sample (group_by), then multiplied that by 0.05 and used that value as the threshold in a filter function prior to summarising the data. The amount of rows after grouping by gene_short_name was what I decided to be the total number of genes that are within the dataset that have passed the initial filtering and thus are expressed in 5% or more of cells in our dataset. 
+
+```{r}
+dg %>% 
+  rowData() %>%
+  as.data.frame() %>%
+  filter(num_cells_expressed >= (0.05 * 6562)) %>% 
+  head()
+```
+
+
+Work with the subset for pre-processing of cds
+```{r}
+subset <- dg %>% 
+  rowData() %>%
+  as.data.frame() %>%
+  dplyr::filter(num_cells_expressed >= (0.05 * 6562))
+```
+
+
+List of genes that fit criteria:
+```{r}
+subset %>% head()
+```
+
+
+Prep for PCA using the list of genes from Q1-1:
+```{r}
+cds_subset <- cds[match(subset$gene_short_name, rowData(cds)$gene_short_name),]
+```
+
+```{r}
+row <- cds_subset %>% rowData() %>% as.data.frame()
+
+gene_ids <- as.vector(row$id)
+
+length(gene_ids)
+```
+
+The number of rows matches the subset (9180)
+
+```{r}
+cds_subset %>% colData() %>% as.data.frame() %>% head()
+```
+
+### PCA (Q1-1)
+```{r}
+cds <- preprocess_cds(cds, method = 'PCA', use_genes = gene_ids, num_dim = 100)
+```
+
+Visualize PCA:
+```{r}
+plot_pc_variance_explained(cds)
+```
+
+Apply UMAP to visualize in 2d
+```{r}
+cds <- reduce_dimension(cds, preprocess_method = 'PCA')
+```
+
+Plot with plot_cells
+```{r}
+plot_cells(cds, color_cells_by='treatment')
+```
+
+From this UMAP, we can see that the majority of all 'mock' exposed cells are clustered on the left of the '0' line in the plot, while the 'tgfb' exposed cells are more distributed, with some close to the 'mock' exposed cells and a certain cluster very far to the right. 
+
+
+## Q1-2: Visualizing Expression of Marker Genes:
+
+```{r}
+plot_cells(cds, genes=c("CDH1", "FN1"))
+```
+
+It appears that FN1 expression levels seems to be distributed more into the treatment section of the UMAP, especially so in the cluster that is far to the right. Both CDH1 and FN1 seem to have a log10(expression) value slightly greater than 0 in the treatment section, with next to no expression levels in the treatment group than in mock control (similar to results from Assignment 2). As we expect from that, treatment exposed cells do partition across areas of high or low marker expression. 
+
+
+## Q 1-3: Cluster Cells with Similar Gene Expression
+
+```{r}
+cds = cluster_cells(cds, reduction_method = "PCA", resolution=1e-3, color_cells_by='Clusters')
+
+plot_cells(cds)
+```
+
+Annotate colData:
+
+```{r}
+colData(cds)$Clusters <- as.character(clusters(cds, reduction_method = "PCA")[colnames(cds)])
+```
+
+```{r}
+unique(cds$Clusters)
+```
+As seen here, there are 5 unique clusters in the dataset.
+
+
+UMAP colored by clusters:
+```{r}
+plot_cells(cds, color_cells_by = 'Clusters')
+```
+
+
+```{r}
+cds_df <- cds %>% colData() %>% as.data.frame()
+
+cds_df %>% head()
+```
+
+
+Generate barplot of frequency of tgfb cells across clusters:
+```{r}
+cds_tgfb <- cds_df[!(cds_df$treatment=='mock'),]
+
+ggplot(cds_tgfb, aes(x=Clusters)) + 
+  geom_bar(aes(y = (stat(count))/sum(stat(count)))) +
+  ggtitle('Frequency of cells across clusters, TGFB treatment')
+```
+
+```{r}
+cds_mock <- cds_df[!(cds_df$treatment=='tgfb'),]
+
+ggplot(cds_mock, aes(x=Clusters)) + 
+  geom_bar(aes(y = (stat(count))/sum(stat(count)))) +
+  ggtitle('Frequency of cells across clusters, Mock treatment')
+```
+
+The distribution of treated and untreated cells is similar for PC1, but differs between the other principal components. Treated cells are more distributed in cluster 2, and less so in 3, 4, 5; meanwhile, untreated cells are more distributed in clusters 3 and 4 than treated cells.
+
+
+## Q2-1: Bar Plot of Distribution of Genetically Perturbed and Unperturbed cells across clusters
+
+```{r}
+cds_df %>% head()
+```
+
+
+```{r}
+unique(cds_df$gene)
+```
+
+I have interpreted genetically perturbed as values in the gene column that indicate a specific gene being targeted (TGFB1, TGFB2, ZEB1) while unperturbed is indicated by 'nontargeting'.
+
+Generate bar plot for perturbed cells across clusters
+```{r}
+cds_perturbed <- cds_df[!(cds_df$gene=='NONTARGETING'),]
+
+ggplot(cds_perturbed, aes(x=Clusters)) + 
+  geom_bar(aes(y = (stat(count))/sum(stat(count)))) +
+  ggtitle('Frequency of cells across clusters, Genetically perturbed')
+```
+
+```{r}
+cds_nonperturbed <- cds_df[!(cds_df$gene=='TGFBR1' | 
+                             cds_df$gene=='TGFBR2' |
+                             cds_df$gene=='ZEB1'),]
+
+ggplot(cds_nonperturbed, aes(x=Clusters)) + 
+  geom_bar(aes(y = (stat(count))/sum(stat(count)))) +
+  ggtitle('Frequency of cells across clusters, Genetically unperturbed')
+```
+
+Not all genotypes are distributed similarly to nontarget control sgRNA expressing cells. As we can see from the nontargeting indicated cells, the distribution seems to be greatest in cluster 1 and 2, then less so in 3 and 4. Meanwhile, targeting indicated cells are more prevalent in cluster 1 and less so in 2 and 3, and much less in 4 and 5. They are similar in that they are mostly distributed into cluster 1 for both sgRNA types.
+
+
+## Q2-2: Violin plot of cells exposed to treatment
+
+Exclude the cells in untreated mock controls
+```{r}
+cds_tgfb <- cds[!(colData(cds)$treatment=='mock'),]
+```
+
+```{r}
+library(ggpubr)
+```
+
+
+Violin plots: CDH1
+```{r}
+cds_subset1 <- cds_tgfb[rowData(cds_tgfb)$gene_short_name == 'CDH1',]
+
+plot_genes_violin(cds_subset1, group_cells_by = 'gene') + stat_compare_means(ref.group = 'NONTARGETING', aes(label = ..p.signif..), method = 'wilcox')
+```
+
+```{r}
+cds_subsl <- cds_tgfb[rowData(cds_tgfb)$gene_short_name == 'CDH1',]
+```
+
+```{r}
+unique(rowData(cds_subsl))
+```
+
+
+For CDH1, the results were mostly not statistically significant compared to the nontargeting group, except for the sgRNA targeted gene TGFBR2. As I mentioned in assignment 1, CDH1 (cadherin 1) is a gene that is critical in epithelial cell adherence, and changes in expression/ mutations / loss of function of this gene have been linked to cancer progression by increasing proliferation, invasion, and metastasis; it has also previously been reported to be linked to the TGFB pathway. Here, there is a change in CDH1 expression for the sgRNA target TGFBR2 gene, which is statistically significant at p < 0.0001 (****). The association between CDH1 and TGFB treatment make sense here, and is consistent with literature that reports connections between this gene and such treatment (and the TGFB pathway).
+A loss of CDH1 expression, and thus E-Cadherin function, leads to increased cell mobility (Verma et al., 2001). Meanwhile, TGFBR2 has been known to regulate cancer proliferation and migration (ncbi), where a loss of TGFBR2 leads to tumor initiation and cancer metastasis in mammary fibroblasts (Busch et al., 2013). These two genes have been studied as linked in experiments on cancer progression, where the loss of both CDH1 and TGFBR2 can induce cancer progression (Andl et al., 2014). Therefore, an sgRNA that targets and disrupts TGFBR2 expression is consistent to induce a decrease in CDH1 expression.
+
+Source: "Germline mutation analysis of the transforming growth factor B receptor type II (TGFBR2) and E-Cadherin(CDH1) genes in early onset and familial colorectal cancer", Vermal et al., J Med Genet, 2001; 38(2), e7. 
+"Concerted loss of TGFB mediated proliferation control and E-cadherin disrupts epithelial homeostasis and causes oral squamous cell carcinoma", Andl et al., Carcinogenesis, 2014, 35(11), 2602-2610.
+
+
+
+Violin plots: FN1
+```{r}
+cds_subset2 <- cds_tgfb[rowData(cds_tgfb)$gene_short_name == 'FN1',]
+
+plot_genes_violin(cds_subset2, group_cells_by = 'gene') + stat_compare_means(ref.group = 'NONTARGETING', aes(label = ..p.signif..), method = 'wilcox')
+```
+
+For FN1, the results were mostly statistically significant compared to the nontargeting group, with all sgRNA targeted genes showing at least one degree of significance (p <= 0.05, or * only). The TGFB-related genes, R1 and R2, showed significance levels below 0.0001 (****), indicating really high significance in their difference from nontargeting. 
+
+As I mentioned in assignment 1 when this marker gene was assigned, it has been reported that FN1 (fibronectin 1) has indeed increased in certain cases of lymphatic endothelial cells when TGF-B (in that case, TGF-B2) was used as treatment on the cells (Yoshimatsu et al., 2020), and in general following 24 hours of TGFB stimulation (Miller et al., 2018)
+Source: "TGF-Beta and TNF-alpha cooperatively induce mesenchymal transition of lymphatic endothelial cells via activation of Activin signals", Yoshimatsu et al., PLOS One, 1-28, 2020.
+"The Dynamics of TGF-B Signaling Are Dictated by Receptor Trafficking via the ESCRT Machinery", Miller et al., Cell Reports, 2018, 25, 1841-1855.
+
+This initially observed association between FN1 and TGFB receptor genes seems to be consistent with the treatment's mechanism of action, as TGFB treatment affects cell proliferation. FN1 is the sole gene that encodes for fibronectins, which are glycoproteins in the ECM that are involved in key cellular processes such as cell growth, differentiation, adhesion, or migration (Ventura et al., 2018), which is definitely a pathway that TGFB can affect as mentioned previously. It has been shown that TGFB signaling has indeed resulted in a positive correlation with expression of FNs in tumor vasculature. 
+Source: "TGF-B induces oncofetal fibronectin that, in turn, modulates TGF-B superfamily signaling in endothelial cells", Ventura et al., Journal of Cell Science, 2018, 131(1)
+
+
+In terms of determining whether this observed decrease in FN1 expression in conjunction with the sgRNA targeted genes  TFGBR1 and TGFBR2 as they are the most statistically significant expression compared to nontargeting control sgRNA expressing cells, I believe this is also consistent with the molecular role of the targeted genes and their relation to FN1. TGFBR1 and R2 are type 1 and type 2 TGF-B receptors, respectively. The gene for TGFBR1 provides instructions for making the receptor protein, which transmits signals from the cell surface through signal transduction, an affects the cell's activities of proliferation and division through the environment (medlineplus.gov/genetics/gene/tgfbr1/). The receptor works by having one end of the protin project into the ECM and one inside the cell, where TGFB can bind to the ECM section of the receptor and activates it, starting the TGFB signaling pathway. In literature, TGFBR2 has also been shown to be directly linked with FN1 expression. As FN1 is also associated with cellular proliferation and is consistently upregulated in TGFB treatment, it should be consistent that if TGFBR1 and TGFBR2 are upgregulated, then FN1 expression should be as well.  Therefore, having sgRNAs against TGFBR1 and TGFBR2 should result in lower expression levels of FN1; this was also reported in literature by Professor McFaline-Figueroa in 2019. It was noted here that sgRNA targeting of the receptor genes result in a failure to activate a TGF-B driven EMT. 
+
+Source: "A pooled single-cell genetic screen identifies regulatory checkpoints in the continuum of the epithelial to mesenchymal transition", McFaline-Figueroa et al., Nat Genet, 2020, 51(9), 1389-1398.
+
+### Most significant sgRNA targeted gene
+Of these, the sgRNA targeted gene that consistently as the largest effect on marker expression compared to nontargeting control sgRNA expressing cells is TGFBR2, which was statistically significant in both CDH1 and FN1 analyses.
+
+
+## Q2-3: UMAP visualizing only subset of treatment exposed cells
+
+Here, cds_tgfb represents the cds with mock control samples filtered out.
+
+```{r}
+cds_tgfbr2 <- cds_tgfb[colData(cds_tgfb)$gene=='TGFBR2',]
+```
+
+```{r}
+unique(colData(cds_tgfbr2)$gene)
+```
+
+
+```{r}
+plot_cells(cds_tgfbr2, color_cells_by='gene') + scale_color_manual(values = c('NONTARGETING' = 'black', 'TGFBR1' = 'green', 'TGFBR2' = 'red', 'ZEB1' = 'blue'))
+```
+
+As we can see from this UMAP, the TGFBR1 and TGFBR2 genes which are very closely related are indeed mostly co-segregated in the 'tgfb' section of the UMAP from Q1. ZEB1 and Nontargeting do not appear to be as grouped in one area. I do not believe that all cells for a given genotype are responding 100% equally, as the far right cluster which should contain only treated cells displays a combination of all genotypes including mostly nontargeting (the prevalence of black in that cluster). However, most of the treated cells in the 'tgfb' section of the large cluster on the left display near-universal expression of TGFBR2, with the green-colored TGFBR1 not being nearly as prevalent. ZEB1 also is mostly prevalent in the same areas where the black NONTARGETING genotypes are distributed.
+
+
+## BONUS: Violin plot of top upregulated and downregulated from Assignment 2
+
+Top Upregulated gene: TGM2
+Function of genotype:
+```{r}
+cds_up1 <- cds[rowData(cds)$gene_short_name == 'TGM2',]
+
+plot_genes_violin(cds_up1, group_cells_by = 'gene') + stat_compare_means(ref.group = 'NONTARGETING', aes(label = ..p.signif..), method = 'wilcox')
+```
+
+Function of treatment:
+```{r}
+plot_genes_violin(cds_up1, group_cells_by = 'treatment') + stat_compare_means(aes(label = ..p.signif..), method = 'wilcox')
+```
+
+Top Downregulated Gene: CA9
+Function of genotype:
+```{r}
+cds_down1 <- cds[rowData(cds)$gene_short_name == 'CA9',]
+
+plot_genes_violin(cds_down1, group_cells_by = 'gene') + stat_compare_means(ref.group = 'NONTARGETING', aes(label = ..p.signif..), method = 'wilcox')
+```
+
+Function of treatment:
+```{r}
+plot_genes_violin(cds_down1, group_cells_by = 'treatment') + stat_compare_means(aes(label = ..p.signif..), method = 'wilcox')
+```
+
+
+## Concepts from Class
+
+## Q3-1: Genomic method to profile differences in gene regulation
+A method discussed in class or identifying regulatory regions for use in profiling gene regulation between the different nematode species is DNAse-seq. It is a method for probing chromatin accessibility genome-wide, and is simple yet able to allow you to identify different fragments in DNAse-seq that map (have access) to specific genomic regions. A variation of this, ATAC-seq, can be used here to profile regulatory regions for our samples and enable short-read sequencing without having to do whole-genome sequencing. In this method, which uses accessible DNA with hyperactive transposase, you can incorporate pieces of DNA into strips of DNA that are accessible, enabling you to quickly do short read sequencing to build the sequencing library for each species. Compared to DNAse-seq, this method can probe chromatin accessibility with lower starting material input and preparation time (which is more suitable for our samples, which are nematodes like C. Elegans without much starting material). As mentioned in the Buenrostro et al. paper, ATAC-seq can provide a multidimensional portrait of gene regulation by identifying regions of open chromatin, then identiying bound and nucleosome-free positions in regulatory regions, then inferring the positions of DNA-binding proteins. 
+
+The resulting ATAC-seq plot distributions across the genome will show peaks, which as discussed in class represent areas of chromatin accessibility (higher peaks will be areas they accumulate, thus more accessible). Subsequent single-cell analyses of different cells as shown in class (and this case different species) will show that accessibility spots and regulatory regions generally will differ between groups of cells / DNA, but footprints of chromatin accessibility can potentially be conserved across different cell types depending on the function of the region, as shown in the paper where CTCF binding is conserved as CTCF is an important factor of genome organization and thus the footprints will be conserved. 
+
+## Q3-2: Identify nature of the SNP containing region
+To identify the nature of the SNP containing genomic region, I think a good method to use is ChIP-seq with ChIP (chromatin immunoprecipitation), which can help identify the regions and distributions of specific TFs occupancy and interaction. ChIP involves enriching for DNA fragments bound by a protein of interest, where protein/DNA interactions are maintained by crosslinking. The specific antibody-DNA interactions are precipitated using antibodies, and can be used to identify specific regions of interest bound by the protein. We can use GO analysis to identify the nature of the SNP containing region. As noted in Abramov et al., the functional effect of single-nucleotide substitutions can be studied in heterozygous chromosome loci where TFs differentially bind to sites in homologous chromosomes with alternative SNP alleles. USing ChIP-seq enables for coverage of TF-binding regions as mentioned, comparing mapped reads containing regions with SNPs can reveal "allele-specific binding events". 
+The model of SNP may alter the expression of BHMT is that the existence of a SNP in the region interacting with the BHMT locus affects the binding sites for transcriptional factors and other proteins, which limits BHMT locus function and expression, especially if ChIP-seq determines that the SNP containing region has regulatory functions.
