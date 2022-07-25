@@ -1,0 +1,245 @@
+---
+title: "2020-11-2 Midterm_Datathon Part 2 Yang_Michael"
+output: html_notebook
+---
+
+```{r}
+.libPaths("C:/Users/Mike/Documents/R-3.6.3/library")
+
+# install required CRAN packages
+for (pkg in c("BiocManager", "data.table", "httr", "FactoMineR", "dendextend", "googledrive")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# install required Bioc packages
+for (pkg in c("limma", "edgeR")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, update = FALSE, ask = FALSE)
+  }
+}
+
+BiocManager::install("GO.db")
+
+BiocManager::install("org.Hs.eg.db")
+```
+
+
+```{r}
+library(googledrive)
+
+# You'll need to open the browser for authentication similar to what we did in
+# colab
+drive_auth()
+# Get the file object in google drive using its unique ID
+count_file <- drive_get(as_id("1n2kzwI07eyaDMHlnWQQm6HHEscqTtI2m"))
+count_file
+
+# download the file to your system
+dir.create("data")
+drive_download(count_file, path=file.path("data", count_file$name))
+```
+
+```{r}
+library(data.table)
+# change the file path to where you download the count table
+DATA <- "data"
+count_file_path <- "dlbc_tcga_count.txt"
+# load the count table, set check.names to FALSE so R doesn't rename your columns!
+rc <- data.frame(fread(file.path(DATA, count_file_path)), row.names=1, check.names = FALSE)
+dim(rc)
+head(rc)
+```
+#### Establish the Tier List from Part 1, using the order of the samples given here
+```{r}
+Tiers <- c("tier1", "tier3", "tier2", "tier2", "tier3", "tier3", "tier1", "tier2", "tier3", "tier2",
+           "tier3", "tier2", "tier2", "tier2", "tier2", "tier2", "tier3", "tier3", "tier3", "tier3",
+           "tier1", "tier2", "tier2", "tier3", "tier3", "tier1", "tier3", "tier2", "tier2", "tier1",
+           "tier2", "tier3", "tier3", "tier2", "tier3", "tier3", "tier3", "tier2", "tier2", "tier3",
+           "tier1", "tier3", "tier3", "tier3", "tier3", "tier2", "tier2", "tier3")
+```
+
+
+#### Building DGEList Object
+```{r}
+library(edgeR)
+dgelist <- DGEList(rc, remove.zeros = T, genes=rownames(rc))
+
+dgelist$samples
+
+```
+
+#### Expanding DGEList object and adding the Tiers to corresponding sample barcodes
+```{r}
+sample_meta <- data.frame(tumor=substr(colnames(rc), 14, 14) == "0",
+                          patient_id=substr(colnames(rc), 1, 12),
+                          Tier=Tiers, #Add tiers to the DGEList
+                          stringsAsFactors = FALSE, check.names = FALSE)
+rownames(sample_meta) <- colnames(rc)
+
+# re-create the DGEList object
+dgelist <- DGEList(rc, group=sample_meta$tumor, remove.zeros = T,
+                   samples=sample_meta, genes=rownames(rc))
+
+print(dgelist$samples, max=48)
+```
+
+#### Establish a design matrix
+```{r}
+design <- model.matrix(~0 + Tier, data=sample_meta)
+head(design)
+```
+
+## START TO PERFORM NORMALIZATION HERE:
+
+#### Remove low-expression genes from dgelist
+```{r}
+keep <- filterByExpr(dgelist, design=design)
+dgelist <- dgelist[keep,,keep.lib.sizes=FALSE]
+
+dim(dgelist)
+```
+#### Estimate library size factor
+```{r}
+dgelist <- calcNormFactors(dgelist, method="TMM")
+head(dgelist$samples)
+```
+
+#### Estimate dispersion
+```{r}
+dgelist <- estimateDisp(dgelist, design)
+plotBCV(dgelist)
+```
+
+
+# 2.1: Using MDS for unsupervised learning data analysis
+
+#### MDS chosen as mentioned in lecture that keeps the original distance space between samples, unlike PCA
+```{r}
+sample_colors = ifelse(dgelist$samples$Tier=="tier1", "red", ifelse(dgelist$samples$Tier=="tier2", "green", "blue"))
+
+plotMDS(dgelist, 
+        labels = ifelse(dgelist$samples$Tier=="tier1", "1", ifelse(dgelist$samples$Tier=="tier2", "2", "3")),
+        col=sample_colors)
+```
+
+It does not seem like the samples can be very evenly separated, but you can definitely see that within this distribution, Tiers 3 tends towards the left more, 2 is more spaced towards that center of the plot, and 1 towards the left. Despite this, we cannot say that we can see the samples in different tiers be evenly separated from this plot.
+
+
+# 2.2: Differential Expression + Gene Set Analysis: Tier 1 vs. (Tier 2 + Tier 3)
+
+#### generalized linear model:
+```{r}
+fit <- glmQLFit(dgelist, design)
+plotQLDisp(fit)
+```
+```{r}
+head(fit$coefficients)
+```
+
+#### Build qlf with contrast that makes the different groups
+#### Three groups, compare 1 vs 3, design coefficients in contrast to sum up to 1
+#### Thus here Tier 1 has contrast value, Tier 2 + 3 (rest) have same contrast values
+```{r}
+qlf = glmQLFTest(fit, contrast = c(1, -0.5, -0.5))
+```
+
+
+#### In order to have overview, n=INF to see all possible genes in our data
+#### All genes are ranked by p-values, FDR (corrected p-values)
+```{r}
+toptags <- as.data.frame(topTags(qlf, n=Inf))
+toptags
+```
+#### Visualize with volcano plot as check, like in lecture
+```{r}
+dot_colors <- ifelse((toptags$logFC > 1) & (toptags$FDR < 5e-2),
+                     "maroon",
+                     ifelse((toptags$logFC < -1) & (toptags$FDR < 5e-2), 
+                            "navy", "gray"))
+plot(x=toptags$logFC, y=-log10(toptags$FDR), pch=16, col=dot_colors)
+```
+The two peaks of the volcano aren't that drastic in size; the two groups are not that different from each other? There are some genes in Group 2 that differ. 
+
+
+#### Using GOAN as the method for gene sense-based analysis (pathway based ana)
+#### Requires this step as this uses ncbi gene IDs, so we need to convert original gene
+#### symbol to gene IDs as mentioned in lecture
+```{r}
+library(httr)
+
+GENE_SYM_ID_LINK_BASE <- "https://www.genenames.org/cgi-bin/download/custom?col=gd_app_sym&col=gd_pub_eg_id&status=Approved&hgnc_dbtag=on&order_by=gd_app_sym_sort&format=text&submit=submit"
+response <- GET(GENE_SYM_ID_LINK_BASE)
+gene_sym_id <- data.frame(fread(text=httr::content(response, "parsed"), header=TRUE))
+colnames(gene_sym_id) <- c("gene_symbol","gene_id")
+
+gene_sym_id <- gene_sym_id[apply(gene_sym_id == "", 1, sum) == 0,]
+gene_sym_id <- gene_sym_id[apply(is.na(gene_sym_id), 1, sum) == 0,]
+
+gene_sym_id <- gene_sym_id[!duplicated(gene_sym_id$gene_id), ]
+rownames(gene_sym_id) <- gene_sym_id$gene_symbol
+
+head(gene_sym_id)
+```
+
+#### In which biological process gene set our differentially expressed genes are enriched in
+```{r}
+go_res <- goana(qlf, geneid=gene_sym_id[rownames(qlf), "gene_id"])
+
+topGO(go_res)
+```
+2.2: Based on the number of genes upregulated or downregulated, as well as the results of the Fisher's exact test based on enrichment analysis, we can see the biological processes that these genes are most enriched in. Any biological processes that have p-DOWN values smaller than the p-UP values means that the process is down-regulated in Tier 1 versus the other group, Tier 2 + Tier 3. 
+Thus, for example with regards to the first 10 processes that appear in the results, they are all more down-regulated in Tier 1 compared to the other group, as their p.DOWN values are much smaller than their P.Up values. 
+Within the next 10 processes, they are all mostly downregulated in Tier 1 versus group 2, with the exception of "ionotropic glutamate receptor binding" which had a P.Up smaller than P.Down. 
+
+
+
+# 2.3: Differential Expression and Gene Set Analysis of (Tier1 + Tier2) vs. Tier3
+
+#### Build qlf2 with contrast that makes the different groups
+#### Three groups, compare (1+2) vs. 3, design coefficients in contrast to sum up to 1
+#### Thus here Tier 1+2 have 1, Tier 3 has -1 contrast values
+```{r}
+qlf2 = glmQLFTest(fit, contrast = c(0.5, 0.5, -1))
+```
+
+
+#### In order to have overview, n=INF to see all possible genes in our data
+#### All genes are ranked by p-values, FDR (corrected p-values)
+```{r}
+toptags2 <- as.data.frame(topTags(qlf2, n=Inf))
+toptags2
+```
+#### Visualize again with another volcano plot
+```{r}
+dot_colors2 <- ifelse((toptags2$logFC > 1) & (toptags2$FDR < 5e-2),
+                     "maroon",
+                     ifelse((toptags2$logFC < -1) & (toptags2$FDR < 5e-2), 
+                            "navy", "gray"))
+plot(x=toptags2$logFC, y=-log10(toptags2$FDR), pch=16, col=dot_colors2)
+```
+Based on the higher volcano peaks compared to 2.2, it seems that there is a greater difference between these two groups of significantly expressed genes.
+
+
+#### Obtain the gene terms through GOAN
+```{r}
+go_res <- goana(qlf2, geneid=gene_sym_id[rownames(qlf2), "gene_id"])
+
+topGO(go_res)
+```
+2.3: For these results, interpretation was the same as was conducted for 2.2; that is, by looking at the p-values for p.UP and p.DOWN, we can see whether these biological processes are mostly upregulated or downregulated between (Tier 1 + Tier 2) and Tier 3 (others). 
+In this case, among the first 10 processes from the topGO result, we can see that they are for the most part all up-regulated in group 1 compared to group 2, with the exception of "immune system process" which has a smaller P.Down compared to P.Up. 
+Within the latter 10 results, most were also up-regulated with the exception of "defense response to other organism" and "defense response", which seem to go together and thus it makes sense that both would be down-regulated in conjunction. 
+
+
+# 2.4: Identify Common Gene Sets or genes in 2 analysis results
+
+#### What could be the difference between samples with pathogenic mutations and samples without?
+2.4: The common gene pathway from the first 10 samples in each analyses is "immune system process" biological process, which was down-regulated in both of the analyses. I believe the reason why the affecting of this process is the same in all groups is because this process is a broad pathway that would definitely be affected as long as a mutation is present, as it would affect how the immune system responds. 
+
+As there is only one common gene path shared between our group combinations, where Tier 1 represented the samples with exact pathogenic variants, Tier 2 had samples with mutation that were not in Tier 1, and Tier 3 were the rest of the DLBCL lymphoma samples, we can possibly draw an assumption that a mutation that is pathogenic has a greater impact on the immune functional pathway than nonspecific mutations as found in Tiers 2 and 3. 
+
+One interesting thing I noticed was that when we divided the samples to be between Tier 1 (with the directly matched pathogenic variants with the DLBCL samples) and the other two tiers, the biological processes that the differentially expressed genes were enriched in were mostly developmental related, and were found to be down-regulated in Tier 1 versus the rest. While we check in our second grouping, where we grouped the mutations in one category and the others in the other, we can see most of the processes upregulated in group 1 versus 2 indicating that having no somatic or pathogenic mutations is not reflected in the biological processes based on our investigation of the gene sets. It is possible that samples that had pathogenic mutations had greater impact on the genes responsible for body development, as those genes specifically were downregulated in Tier 1. 
+
+
